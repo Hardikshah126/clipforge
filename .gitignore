@@ -1,0 +1,11 @@
+# runtime data: uploads, jobs, transcripts, previews
+data/
+__pycache__/
+*.pyc
+
+# YouTube cookies — never commit
+cookies.txt
+
+# Windows system fonts (not redistributable) — copied from C:\Windows\Fonts at startup
+fonts/impact.ttf
+fonts/seguibl.ttf

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipForge</title>
+<link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+<aside class="side">
+  <div class="brand"><span class="logo">◆</span> ClipForge</div>
+  <button class="btn ghost wide" id="newBtn">＋ New project</button>
+  <div class="side-label">Projects</div>
+  <div id="jobList" class="job-list"></div>
+</aside>
+
+<main>
+  <!-- ============ NEW PROJECT ============ -->
+  <section id="newView">
+    <header class="page-head">
+      <h1>Turn a long video into scroll-stopping clips</h1>
+      <p class="muted">Paste a link or drop a file → pick gameplay & caption style → AI finds the best moments → polished vertical clips.</p>
+    </header>
+
+    <!-- 1 source -->
+    <div class="card">
+      <div class="card-head"><span class="step">1</span><h2>Source video</h2></div>
+      <div class="tabs" id="srcTabs">
+        <button class="tab on" data-t="url">YouTube link</button>
+        <button class="tab" data-t="upload">Upload a file</button>
+      </div>
+      <div id="srcUrl" class="src-pane">
+        <input id="urlIn" class="input big" placeholder="https://youtu.be/…" autocomplete="off">
+        <p class="hint" id="cookieHint"></p>
+      </div>
+      <div id="srcUpload" class="src-pane hidden">
+        <label class="drop" id="drop">
+          <input type="file" id="fileIn" accept="video/*" hidden>
+          <div class="drop-in"><div class="drop-icon">⬆</div><div><b>Drop a video here</b> or click to choose</div><div class="muted small">MP4, MOV, MKV, WEBM</div></div>
+        </label>
+        <div id="upState" class="upstate hidden"><div class="bar"><i id="upBar"></i></div><span id="upText"></span></div>
+      </div>
+    </div>
+
+    <!-- 2 layout + gameplay -->
+    <div class="card">
+      <div class="card-head"><span class="step">2</span><h2>Layout & gameplay</h2></div>
+      <div class="layouts" id="layouts">
+        <button class="layout on" data-l="split"><div class="lp split"><i></i><i></i></div><b>Split + gameplay</b><span>Speaker top, gameplay bottom</span></button>
+        <button class="layout" data-l="stream"><div class="lp stream"><i></i><i></i></div><b>Streamer cam</b><span>Their facecam top, their gameplay bottom</span></button>
+        <button class="layout" data-l="full"><div class="lp full"><i></i></div><b>Full vertical</b><span>Center-cropped 9:16</span></button>
+        <button class="layout" data-l="fit"><div class="lp fit"><i></i></div><b>Fit + blur</b><span>Whole frame on blurred fill</span></button>
+      </div>
+      <div id="gpBlock">
+        <div class="row between"><h3>Gameplay library</h3>
+          <label class="btn small ghost"><input type="file" id="gpIn" accept="video/*" hidden multiple>＋ Add gameplay</label></div>
+        <div class="gp-grid" id="gpGrid"></div>
+        <p class="hint">Gameplay is always muted. “Mix” rotates through your library so each clip gets different footage.</p>
+      </div>
+      <label class="toggle"><input type="checkbox" id="avoidBurned" checked><span></span>Hide captions already burned into the source (crops out the bottom quarter)</label>
+    </div>
+
+    <!-- 3 captions -->
+    <div class="card">
+      <div class="card-head"><span class="step">3</span><h2>Caption style</h2></div>
+      <div class="cap-wrap">
+        <div>
+          <div class="presets" id="presets"></div>
+          <details class="custom" id="customBox" open>
+            <summary>Fine-tune</summary>
+            <div class="grid2">
+              <label>Font<select id="fFont"></select></label>
+              <label>Size<input type="range" id="fSize" min="48" max="150"><output id="oSize"></output></label>
+              <label>Text color<input type="color" id="fColor"></label>
+              <label>Highlight color<input type="color" id="fHl"></label>
+              <label>Outline color<input type="color" id="fOc"></label>
+              <label>Outline<input type="range" id="fOw" min="0" max="14" step="1"><output id="oOw"></output></label>
+              <label>Words per line<input type="range" id="fMw" min="1" max="5"><output id="oMw"></output></label>
+              <label>Pop size<input type="range" id="fPop" min="100" max="135"><output id="oPop"></output>%</label>
+              <label>Position<select id="fPos">
+                <option value="auto">Auto (on the seam)</option><option value="upper">Upper</option>
+                <option value="center">Center</option><option value="lower">Lower third</option></select></label>
+              <label class="checks"><span><input type="checkbox" id="fUpper"> UPPERCASE</span><span><input type="checkbox" id="fStrip"> Drop commas/periods</span></label>
+            </div>
+          </details>
+        </div>
+        <div class="phone-col">
+          <div class="phone" id="phone">
+            <div class="ph-top"></div><div class="ph-bot" id="phBot"></div>
+            <div class="ph-cap" id="phCap"></div>
+            <img id="realPrev" class="real hidden" alt="">
+          </div>
+          <div class="row center gap">
+            <button class="btn small ghost" id="realBtn">Render exact preview</button>
+            <button class="btn small ghost hidden" id="liveBtn">Back to live</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4 edit -->
+    <div class="card">
+      <div class="card-head"><span class="step">4</span><h2>Edit</h2></div>
+      <div class="grid3">
+        <label>Number of clips<input type="number" id="eCount" min="1" max="12" value="5"></label>
+        <label>Min length (s)<input type="number" id="eMin" min="10" max="120" value="30"></label>
+        <label>Max length (s)<input type="number" id="eMax" min="15" max="180" value="40"></label>
+      </div>
+      <label class="toggle"><input type="checkbox" id="eAi" checked><span></span>AI moment picker (Claude reads the transcript and picks hooks with a payoff)</label>
+    </div>
+
+    <div class="go-row">
+      <span class="muted" id="goHint"></span>
+      <button class="btn primary big" id="goBtn">Find the best moments →</button>
+    </div>
+  </section>
+
+  <!-- ============ JOB ============ -->
+  <section id="jobView" class="hidden">
+    <header class="page-head row between">
+      <div><h1 id="jTitle">Project</h1><p class="muted" id="jSub"></p></div>
+      <div class="row gap"><button class="btn small ghost hidden" id="retryBtn">Retry</button><button class="btn small ghost danger" id="delBtn">Delete</button></div>
+    </header>
+
+    <div class="card" id="progCard">
+      <div class="prog"><div class="spinner" id="spin"></div><div><b id="jStage"></b><div class="log" id="jLog"></div></div></div>
+      <div class="error hidden" id="jErr"></div>
+    </div>
+
+    <div id="clipsBlock" class="hidden">
+      <div class="card">
+        <div class="row between wrap">
+          <h2>Moments <span class="muted small" id="selCount"></span></h2>
+          <div class="row gap wrap">
+            <label class="inline">Style <select id="jPreset"></select></label>
+            <label class="inline">Highlight <input type="color" id="jHl"></label>
+            <label class="inline">Layout <select id="jLayout"><option value="split">Split + gameplay</option><option value="stream">Streamer cam</option><option value="full">Full vertical</option><option value="fit">Fit + blur</option></select></label>
+            <label class="inline" id="jGpWrap">Gameplay <select id="jGp"></select></label>
+          </div>
+        </div>
+        <div id="clips" class="clips"></div>
+        <div class="go-row"><span class="muted small" id="renderHint"></span><button class="btn primary big" id="renderBtn">Render selected clips →</button></div>
+      </div>
+
+      <div class="card hidden" id="frameCard">
+        <div class="row between wrap"><h2>Facecam framing</h2>
+          <div class="row gap"><span class="muted small" id="frameNote"></span><button class="btn small ghost" id="detectBtn">↻ Auto-detect again</button></div></div>
+        <p class="hint">Drag the <b class="c-face">yellow box</b> onto the streamer's face (top half) and the <b class="c-game">green box</b> over the gameplay (bottom half). Drag the corner to resize.</p>
+        <div class="frame-wrap">
+          <div class="frame-stage" id="frameStage">
+            <img id="frameImg" alt="">
+            <div class="fbox face" id="boxFace"><span>FACE · top</span><i class="h"></i></div>
+            <div class="fbox game" id="boxGame"><span>GAMEPLAY · bottom</span><i class="h"></i></div>
+          </div>
+          <div class="mini-out"><div class="mo-top" id="moTop"></div><div class="mo-bot" id="moBot"></div><div class="mo-cap">CAPTIONS</div></div>
+        </div>
+      </div>
+
+      <div class="card hidden" id="outCard">
+        <div class="row between wrap"><h2>Your clips</h2>
+          <div class="row gap wrap"><span class="muted small mono" id="outDir"></span>
+          <button class="btn small ghost" id="metaBtn">↻ Regenerate titles</button></div></div>
+        <div class="outs" id="outs"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal hidden" id="modal"><div class="modal-in"><img id="modalImg" alt=""><button class="btn small ghost" id="modalX">Close</button></div></div>
+<div class="toast hidden" id="toast"></div>
+<script src="/static/app.js?v=4"></script>
+</body>
+</html>
