@@ -11,10 +11,12 @@ JOBS = DATA / "jobs"
 UPLOADS = DATA / "uploads"
 THUMBS = DATA / "thumbs"
 GAMEPLAY = ROOT / "gameplay"
+MUSIC = ROOT / "music"
+BRAND = ROOT / "brand"
 EXPORT = ROOT / "export"
 COOKIES = APP / "cookies.txt"           # optional: Netscape cookies file for yt-dlp
 
-for d in (DATA, JOBS, UPLOADS, THUMBS, GAMEPLAY, EXPORT):
+for d in (DATA, JOBS, UPLOADS, THUMBS, GAMEPLAY, MUSIC, BRAND, EXPORT):
     d.mkdir(parents=True, exist_ok=True)
 
 
@@ -52,3 +54,4 @@ CLAUDE = "claude"
 # low-RAM machine: keep every ffmpeg call small
 FF_THREADS = ["-threads", "2", "-filter_threads", "1"]
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+AUDIO_EXT = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}

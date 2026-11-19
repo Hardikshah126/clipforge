@@ -79,7 +79,7 @@ output{color:var(--text);font-size:12px}
 .toggle input:checked+span{background:var(--acc)}.toggle input:checked+span::after{left:19px;background:var(--acc-ink)}
 
 /* layouts */
-.layouts{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+.layouts{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px}
 .layout{background:var(--bg);border:1.5px solid var(--line);border-radius:12px;padding:14px;color:var(--text);font:inherit;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center}
 .layout span{font-size:12px;color:var(--muted)}
 .layout.on{border-color:var(--acc);background:#ffd60a0a}
@@ -190,3 +190,50 @@ output{color:var(--text);font-size:12px}
 .mo-top{top:0}.mo-bot{bottom:0}
 .mo-cap{position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);text-align:center;font:800 13px "Poppins ExtraBold",sans-serif;color:#fff;-webkit-text-stroke:2.5px #000;paint-order:stroke fill}
 @media (max-width:900px){.layouts{grid-template-columns:1fr 1fr}.frame-wrap{grid-template-columns:1fr}.mini-out{margin:0 auto}}
+
+/* polish panel */
+.pol{display:grid;grid-template-columns:repeat(3,1fr);gap:14px 22px}
+.pol-group{display:flex;flex-direction:column;gap:9px;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.pol-group h4{margin:0 0 2px;font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.pol .toggle{margin:0;font-size:13.5px}
+.pol label.f{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;font-size:13px;color:var(--text)}
+.pol label.f select,.pol label.f input[type=text]{width:58%}
+.pol label.f input[type=range]{width:50%}
+.pol .row-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pol .logo-prev{height:34px;border-radius:6px;background:#fff1;padding:3px}
+.polish-job{margin-top:14px}
+textarea.input{resize:vertical;font-family:inherit}
+/* score badge */
+.score{display:inline-flex;align-items:center;gap:6px;font:800 12px var(--ui);padding:3px 9px;border-radius:20px;margin-right:8px;vertical-align:2px}
+.score.hi{background:#30d38a22;color:#30d38a;border:1px solid #30d38a66}
+.score.mid{background:#ffd60a1c;color:#ffd60a;border:1px solid #ffd60a66}
+.score.lo{background:#ff5a6a1c;color:#ff8a96;border:1px solid #ff5a6a66}
+.reasons{font-size:12px;color:var(--muted);margin:2px 0 6px}
+.reasons span{display:inline-block;margin-right:10px}
+.hk{display:flex;align-items:center;gap:8px;margin:4px 0 6px}
+.hk span{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);white-space:nowrap}
+.hk input{font:700 12.5px var(--ui);padding:5px 8px;letter-spacing:.02em}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.chips i{font-style:normal;font-size:11.5px;padding:2px 8px;border-radius:12px;background:var(--panel2);border:1px solid var(--line)}
+.loop{color:#5aa9ff}
+@media (max-width:900px){.pol{grid-template-columns:1fr}}
+
+.lp.auto i:first-child{flex:1;background:linear-gradient(135deg,#ff8a4c66,#30d38a55)}.lp.auto i:last-child{flex:1;background:#5aa9ff55;border-top:1.5px dashed var(--acc)}
+.phone.auto .ph-top{background:linear-gradient(160deg,#6b3d2e,#2a1a14)}
+.phone.auto .ph-bot{background-image:none!important;background:linear-gradient(160deg,#2b4a7a,#141f33)}
+#streamMode+span{flex:none}
+@media (max-width:1100px){.layouts{grid-template-columns:repeat(3,1fr)}}
+
+/* live mode */
+.live-opts{margin-top:12px}
+.live-pill{background:#ff2d55;color:#fff;font:800 12px var(--ui);padding:4px 10px;border-radius:20px;letter-spacing:.06em;animation:pulse 1.4s infinite}
+.live-pill.off{background:var(--line);color:var(--muted);animation:none}
+.live-pill.wait{background:#ffd60a;color:#1a1500}
+.live-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+.live-stats div{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.live-stats span{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.live-stats b{font:800 22px var(--ui)}
+.spark-wrap{display:flex;flex-direction:column;gap:6px}
+#spark{width:100%;height:70px;background:var(--bg);border:1px solid var(--line);border-radius:10px}
+.at{font:700 11px ui-monospace,Consolas,monospace;color:#ff8a96;margin-right:6px}
+@media (max-width:900px){.live-stats{grid-template-columns:1fr 1fr}}

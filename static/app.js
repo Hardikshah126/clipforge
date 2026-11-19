@@ -17,7 +17,7 @@ const CSS_FONT = { "Impact": '"Impact CF"', "Segoe UI Black": '"Segoe UI Black C
 const fontCss = f => CSS_FONT[f] || `"${f}"`;
 const SINGLE_PALETTE = ["#FFE600", "#FFFFFF", "#22E06B", "#FFFFFF", "#FF4D6D", "#FFFFFF", "#38E1FF", "#FFFFFF"];
 const POS_Y = { upper: 620, center: 960, seam: 960, lower: 1380 };
-const AUTO_Y = { split: 960, stream: 960, full: 1380, fit: 1460 };
+const AUTO_Y = { split: 960, stream: 960, auto: 960, full: 1380, fit: 1460 };
 
 let STATE = null;          // server state (presets, gameplay, defaults)
 let S = null;              // new-project settings
@@ -34,7 +34,9 @@ async function init() {
   $("#cookieHint").textContent = STATE.cookies
     ? "cookies.txt found — YouTube downloads will use it."
     : "If YouTube shows “confirm you’re not a bot”, download the video yourself and use Upload a file.";
+  S.polish = { ...STATE.defaults.polish, ...(saved?.polish || {}) };
   buildPresets(); buildFontSelect(); bindNew(); renderGameplay(); syncControls(); startPreview();
+  renderPolish($("#polishNew"), S.polish, () => persist());
   await refreshJobs();
   setInterval(refreshJobs, 4000);
   const h = location.hash.slice(1);
@@ -50,16 +52,29 @@ function bindNew() {
     src.type = b.dataset.t;
     $("#srcUrl").classList.toggle("hidden", src.type !== "url");
     $("#srcUpload").classList.toggle("hidden", src.type !== "upload");
+    $("#srcLive").classList.toggle("hidden", src.type !== "live");
+    $("#goBtn").textContent = src.type === "live" ? "🔴 Start watching live →" : "Find the best moments →";
   });
   const drop = $("#drop");
   ["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("over"); }));
   ["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("over"); }));
-  drop.addEventListener("drop", ev => ev.dataTransfer.files[0] && doUpload(ev.dataTransfer.files[0]));
-  $("#fileIn").onchange = e => e.target.files[0] && doUpload(e.target.files[0]);
+  drop.addEventListener("drop", ev => ev.dataTransfer.files.length && doUpload(ev.dataTransfer.files));
+  $("#fileIn").onchange = e => e.target.files.length && doUpload(e.target.files);
   $("#gpIn").onchange = async e => { for (const f of e.target.files) await uploadGameplay(f); e.target.value = ""; };
 
   $$("#layouts .layout").forEach(b => b.onclick = () => { S.layout = b.dataset.l; syncControls(); });
   $("#avoidBurned").onchange = e => { S.avoid_burned = e.target.checked; persist(); };
+  $("#streamMode").onchange = e => {
+    S.mode = e.target.checked ? "stream" : "video";
+    if (e.target.checked && S.layout === "split") S.layout = "auto";
+    syncControls();
+  };
+  $("#urlIn").addEventListener("input", () => {      // stream links switch stream mode on by themselves
+    const v = $("#urlIn").value.toLowerCase();
+    if (/twitch\.tv|kick\.com|youtube\.com\/live\//.test(v) && S.mode !== "stream") {
+      S.mode = "stream"; if (S.layout === "split") S.layout = "auto"; syncControls(); toast("Stream link detected — Stream VOD mode on");
+    }
+  });
 
   const bindStyle = (id, key, num, out) => {
     const el = $(id);
@@ -94,6 +109,7 @@ function syncControls() {
   $$("#layouts .layout").forEach(b => b.classList.toggle("on", b.dataset.l === S.layout));
   $("#gpBlock").classList.toggle("hidden", S.layout !== "split");
   $("#avoidBurned").checked = !!S.avoid_burned;
+  $("#streamMode").checked = S.mode === "stream";
   $("#phone").className = "phone " + S.layout;
   const st = S.style;
   $("#fFont").value = st.font; $("#fSize").value = st.size; $("#oSize").textContent = st.size;
@@ -166,35 +182,106 @@ function xhrUpload(url, file, onProg) {
     x.send(file);
   });
 }
-async function doUpload(f) {
-  upload = null;
+let uploads = [];            // batch: every finished upload waits here until "Find the best moments"
+async function doUpload(files) {
+  files = [...files];
   $("#upState").classList.remove("hidden");
-  $("#upText").textContent = `Uploading ${f.name}…`;
-  try {
-    const j = await xhrUpload("/api/upload", f, p => { $("#upBar").style.width = (p * 100).toFixed(0) + "%"; });
-    upload = j; $("#upBar").style.width = "100%"; $("#upText").textContent = `✓ ${f.name} ready`;
-  } catch (e) { $("#upText").textContent = e.message; toast(e.message, 1); }
+  for (const [k, f] of files.entries()) {
+    $("#upText").textContent = `Uploading ${f.name}${files.length > 1 ? ` (${k + 1}/${files.length})` : ""}…`;
+    try {
+      const j = await xhrUpload("/api/upload", f, p => { $("#upBar").style.width = (p * 100).toFixed(0) + "%"; });
+      uploads.push(j);
+    } catch (e) { toast(`${f.name}: ${e.message}`, 1); }
+  }
+  upload = uploads[0] || null;
+  $("#upBar").style.width = "100%";
+  $("#upText").textContent = uploads.length
+    ? `✓ ${uploads.length} video${uploads.length > 1 ? "s" : ""} ready: ${uploads.map(u => u.name).join(", ")}` : "Upload failed";
 }
 
-/* ---- start */
+/* ---- start (one project per link / file = batch) */
 async function start() {
-  let source;
+  if (src.type === "live") {
+    const url = $("#liveIn").value.trim();
+    if (!url) return toast("Paste the live channel link first", 1);
+    $("#goBtn").disabled = true;
+    try {
+      const job = await api("/api/live", { method: "POST", body: { url, settings: { ...S, live_sens: $("#liveSens").value } } });
+      $("#liveIn").value = ""; await refreshJobs(); openJob(job.id);
+    } catch (e) { toast(e.message, 1); }
+    $("#goBtn").disabled = false;
+    return;
+  }
+  let sources = [];
   if (src.type === "url") {
-    const url = $("#urlIn").value.trim();
-    if (!url) return toast("Paste a YouTube link first", 1);
-    source = { type: "url", url };
+    const urls = $("#urlIn").value.split(/\s+/).map(s => s.trim()).filter(Boolean);
+    if (!urls.length) return toast("Paste a YouTube link first", 1);
+    sources = urls.map(url => ({ type: "url", url }));
   } else {
-    if (!upload) return toast("Upload a video first", 1);
-    source = { type: "upload", upload_id: upload.upload_id };
+    if (!uploads.length) return toast("Upload a video first", 1);
+    sources = uploads.map(u => ({ type: "upload", upload_id: u.upload_id }));
   }
   if (S.min_len > S.max_len) return toast("Min length is longer than max length", 1);
   $("#goBtn").disabled = true;
-  try {
-    const job = await api("/api/jobs", { method: "POST", body: { source, settings: S } });
-    $("#urlIn").value = ""; upload = null; $("#upState").classList.add("hidden");
-    await refreshJobs(); openJob(job.id);
-  } catch (e) { toast(e.message, 1); }
+  let first = null, failed = 0;
+  for (const source of sources) {
+    try { const job = await api("/api/jobs", { method: "POST", body: { source, settings: S } }); first = first || job; }
+    catch (e) { failed++; toast(e.message, 1); }
+  }
+  if (first) {
+    $("#urlIn").value = ""; uploads = []; upload = null; $("#upState").classList.add("hidden");
+    if (sources.length > 1) toast(`Queued ${sources.length - failed} projects — they run one after another`);
+    await refreshJobs(); openJob(first.id);
+  }
   $("#goBtn").disabled = false;
+}
+
+/* ---------------------------------------------------------------- polish panel (shared) */
+function renderPolish(box, pol, onChange) {
+  const music = STATE.music || [];
+  const tg = (k, label) => `<label class="toggle"><input type="checkbox" data-k="${k}" ${pol[k] ? "checked" : ""}><span></span>${label}</label>`;
+  box.innerHTML = `<div class="pol">
+    <div class="pol-group"><h4>Pacing</h4>
+      ${tg("cut_silence", "Cut silences (jump cuts)")}
+      <label class="f">Min pause<input type="range" data-k="max_gap" data-num min="0.2" max="1" step="0.05" value="${pol.max_gap}"><output>${pol.max_gap}s</output></label>
+      ${tg("cut_fillers", "Remove “um / uh”")}
+      <label class="f">Punch-in zooms<select data-k="zoom">${["off", "subtle", "punchy"].map(z => `<option ${z === pol.zoom ? "selected" : ""}>${z}</option>`).join("")}</select></label>
+    </div>
+    <div class="pol-group"><h4>Emphasis</h4>
+      ${tg("hook_title", "Hook title in the first seconds")}
+      ${tg("hero", "Hero words in their own color")}
+      ${tg("emojis", "Emoji pops on key words")}
+      ${tg("progress", "Progress bar")}
+      ${tg("end_card", "End card")}
+      <label class="f">End-card text<input type="text" data-k="cta" value="${esc(pol.cta)}" maxlength="28"></label>
+    </div>
+    <div class="pol-group"><h4>Sound & brand</h4>
+      ${tg("sfx", "Sound effects (whoosh · pop · boom)")}
+      <label class="f">SFX volume<input type="range" data-k="sfx_vol" data-num min="0" max="1" step="0.05" value="${pol.sfx_vol}"></label>
+      <label class="f">Music<select data-k="music"><option value="off">Off</option>${music.length ? `<option value="random" ${pol.music === "random" ? "selected" : ""}>Random from library</option>` : ""}${music.map(m => `<option ${m.name === pol.music ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></label>
+      <label class="f">Music volume<input type="range" data-k="music_vol" data-num min="0" max="0.5" step="0.02" value="${pol.music_vol}"></label>
+      <div class="row-btns"><label class="btn small ghost"><input type="file" accept="audio/*" hidden multiple class="musIn">＋ Add music</label><span class="muted small">${music.length} track${music.length === 1 ? "" : "s"} · auto-ducks under voice</span></div>
+      <label class="f">@handle<input type="text" data-k="handle" value="${esc(pol.handle)}" placeholder="@yourchannel" maxlength="30"></label>
+      <div class="row-btns">${tg("logo", "Logo")}${STATE.logo ? `<img class="logo-prev" src="${STATE.logo}" alt="">` : ""}<label class="btn small ghost"><input type="file" accept="image/*" hidden class="logoIn">${STATE.logo ? "Change" : "Upload"} logo</label></div>
+    </div></div>`;
+  $$("[data-k]", box).forEach(el => {
+    const ev = el.type === "range" || el.type === "text" ? "input" : "change";
+    el.addEventListener(ev, () => {
+      const k = el.dataset.k;
+      pol[k] = el.type === "checkbox" ? el.checked : el.dataset.num !== undefined ? +el.value : el.value;
+      if (k === "max_gap") el.nextElementSibling.textContent = el.value + "s";
+      onChange(pol);
+    });
+  });
+  $(".musIn", box).onchange = async e => {
+    for (const f of e.target.files) { try { await xhrUpload("/api/music", f, () => { }); toast(`Added ${f.name}`); } catch (err) { toast(err.message, 1); } }
+    STATE = await api("/api/state"); if (!pol.music || pol.music === "off") pol.music = "random"; onChange(pol); renderPolish(box, pol, onChange);
+  };
+  $(".logoIn", box).onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    try { await xhrUpload("/api/brand-logo", f, () => { }); STATE = await api("/api/state"); pol.logo = true; onChange(pol); renderPolish(box, pol, onChange); toast("Logo saved"); }
+    catch (err) { toast(err.message, 1); }
+  };
 }
 
 /* ---------------------------------------------------------------- caption live preview */
@@ -287,7 +374,7 @@ async function refreshJobs() {
     $$("#jobList .job-item").forEach(x => x.onclick = () => openJob(x.dataset.id));
   } catch { }
 }
-const statusText = j => ({ queued: "Queued", working: "Working…", ready: `${j.clips} moments found`, done: `${j.rendered} clips rendered`, error: "Needs attention" }[j.status] || j.status);
+const statusText = j => ({ live: `🔴 Live · ${j.clips} clips`, queued: "Queued", working: "Working…", ready: `${j.clips} moments found`, done: `${j.rendered} clips rendered`, error: "Needs attention" }[j.status] || j.status);
 
 function showNew() {
   currentJob = null; clearTimeout(pollT); location.hash = "";
@@ -309,13 +396,13 @@ function poll() {
     if (!currentJob) return;
     try {
       const j = await api("/api/jobs/" + currentJob.id);
-      const changed = JSON.stringify([j.status, j.log.length, j.outputs, j.clips.length]) !== JSON.stringify([currentJob.status, currentJob.log.length, currentJob.outputs, currentJob.clips.length]);
+      const changed = JSON.stringify([j.status, j.log.length, j.outputs, j.clips.length, j.live]) !== JSON.stringify([currentJob.status, currentJob.log.length, currentJob.outputs, currentJob.clips.length, currentJob.live]);
       const statusChanged = j.status !== currentJob.status || j.clips.length !== currentJob.clips.length;
       currentJob = j;
       if (changed) renderJob(statusChanged);
     } catch { }
     poll();
-  }, ["queued", "working"].includes(currentJob.status) ? 1200 : 5000);
+  }, ["queued", "working"].includes(currentJob.status) ? 1200 : currentJob.status === "live" ? 2500 : 5000);
 }
 
 function renderJob(full) {
@@ -331,12 +418,17 @@ function renderJob(full) {
   $("#retryBtn").onclick = async () => { await api(`/api/jobs/${j.id}/retry`, { method: "POST", body: {} }); openJob(j.id); };
   $("#delBtn").onclick = async () => { if (!confirm("Delete this project? Rendered clips in the export folder are kept.")) return; await api(`/api/jobs/${j.id}/delete`, { method: "POST", body: {} }); showNew(); };
 
+  const isLive = j.type === "live";
+  $("#liveCard").classList.toggle("hidden", !isLive);
+  if (isLive) renderLive(j);
   const has = j.clips.length > 0;
   $("#clipsBlock").classList.toggle("hidden", !has);
   if (!has) return;
   if (full) renderClipEditor();
   renderOutputs();
-  if (full) renderFrame();
+  if (full && !isLive) renderFrame();
+  $("#momentsCard").classList.toggle("hidden", isLive);
+  if (isLive) { $("#frameCard").classList.add("hidden"); $("#outCard").classList.remove("hidden"); }
   $("#renderBtn").disabled = busy;
   $("#renderBtn").textContent = busy ? "Rendering…" : (Object.values(j.outputs).some(o => o.status === "done") ? "Re-render changed clips →" : "Render selected clips →");
 }
@@ -358,13 +450,24 @@ function renderClipEditor() {
     renderFrame();
   };
   $("#jGp").onchange = e => pushSettings({ gameplay: e.target.value });
+  const jpol = { ...STATE.defaults.polish, ...(st.polish || {}) };
+  let polT = null;
+  renderPolish($("#polishJob"), jpol, pol => { clearTimeout(polT); polT = setTimeout(() => pushSettings({ polish: { ...pol } }), 600); });
 
+  const badge = c => {
+    if (c.score === undefined) return "";
+    const cls = c.score >= 80 ? "hi" : c.score >= 60 ? "mid" : "lo";
+    return `<span class="score ${cls}" title="Hook / virality score">🔥 ${c.score}</span>`;
+  };
   $("#clips").innerHTML = j.clips.map((c, i) => `
     <div class="clip ${c.selected ? "" : "off"}" data-id="${c.id}">
       <input type="checkbox" ${c.selected ? "checked" : ""}>
-      <div><input class="ttl input" value="${esc(c.title)}">
-        <div class="hook">${esc(c.hook || "")}</div>
-        <div class="txt">${esc(c.text)}</div></div>
+      <div><div class="row">${badge(c)}<input class="ttl input" value="${esc(c.title)}"></div>
+        <div class="hook">${esc(c.hook || "")}${c.loop ? ' <span class="loop">· ↻ loops</span>' : ""}</div>
+        ${(c.reasons || []).length ? `<div class="reasons">${c.reasons.map(r => `<span>• ${esc(r)}</span>`).join("")}</div>` : ""}
+        <div class="hk"><span>Hook title</span><input class="input hkIn" value="${esc(c.hook_text || "")}" maxlength="60" placeholder="ON-SCREEN HOOK"></div>
+        <div class="txt">${esc(c.text)}</div>
+        ${((c.keywords || []).length || (c.emojis || []).length) ? `<div class="chips">${(c.emojis || []).map(e => `<i>${esc(e.emoji)} ${esc(e.word)}</i>`).join("")}${(c.keywords || []).slice(0, 8).map(k => `<i>${esc(k)}</i>`).join("")}</div>` : ""}</div>
       <div class="times">
         <div class="tm"><span>Start</span><button data-d="-0.5" data-f="start">−</button><input data-f="start" value="${fmt(c.start)}"><button data-d="0.5" data-f="start">+</button></div>
         <div class="tm"><span>End</span><button data-d="-0.5" data-f="end">−</button><input data-f="end" value="${fmt(c.end)}"><button data-d="0.5" data-f="end">+</button></div>
@@ -381,6 +484,7 @@ function renderClipEditor() {
     };
     $("input[type=checkbox]", el).onchange = e => { c.selected = e.target.checked; upd(); };
     $(".ttl", el).onchange = e => { c.title = e.target.value; pushClips(); };
+    $(".hkIn", el).onchange = e => { c.hook_text = e.target.value.toUpperCase(); e.target.value = c.hook_text; pushClips(); };
     $$(".tm button", el).forEach(b => b.onclick = () => { c[b.dataset.f] = Math.round((c[b.dataset.f] + +b.dataset.d) * 100) / 100; upd(); });
     $$(".tm input", el).forEach(i => i.onchange = () => { const v = parseT(i.value); if (!isNaN(v)) c[i.dataset.f] = v; upd(); });
     $(".pv", el).onclick = async e => {
@@ -437,7 +541,7 @@ function renderOutputs() {
         <div class="meta-lbl"><span>Description</span><button class="cp" data-cp="d" data-id="${c.id}">Copy</button></div>
         <textarea class="meta-d" rows="6" data-id="${c.id}">${esc(o.meta.description)}</textarea>
       </div>` : (o.status === "done" ? `<div class="muted small meta-wait">${["queued", "working"].includes(j.status) ? "Writing title & description…" : "No title yet — press ↻ Regenerate titles."}</div>` : "");
-    return `<div class="out">${media}<div class="m"><b>${esc(c.title)}</b>
+    return `<div class="out">${media}<div class="m"><b>${c.at ? `<span class="at">${c.at}</span>` : ""}${esc(c.title)}</b>
       ${o.status === "done" ? `<div class="row"><a class="btn small" href="${o.url}" download>Download</a><span class="muted small">${o.dur}s</span></div>` : ""}
       ${meta}</div></div>`;
   }).join("");
@@ -522,4 +626,39 @@ function renderFrame() {
     }
   };
   img.complete && img.naturalWidth ? ready() : (img.onload = ready);
+}
+
+
+/* ---------------------------------------------------------------- live dashboard */
+const hms = s => { s = Math.floor(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(x).padStart(2, "0"); };
+function renderLive(j) {
+  const L = j.live || {}, st = L.state || "starting";
+  const pill = $("#livePill");
+  pill.className = "live-pill" + (st === "recording" ? "" : st === "waiting" || st === "starting" ? " wait" : " off");
+  pill.textContent = st === "recording" ? "● LIVE" : st === "waiting" ? "WAITING" : st === "starting" ? "CONNECTING" : st === "stopping" ? "STOPPING" : "ENDED";
+  $("#liveState").textContent = { recording: `Watching ${L.platform || ""} — clips appear below as hype hits`, waiting: "Channel isn't live yet — will start automatically",
+    starting: "Connecting to the stream…", stopping: "Finishing the last chunk…", ended: "Session finished" }[st] || st;
+  $("#lsRec").textContent = hms(L.recorded);
+  $("#lsChat").textContent = L.chat_rate ? `${L.chat_rate}/s` : "–";
+  $("#lsClips").textContent = j.clips.length;
+  $("#lsSens").textContent = j.settings.live_sens || "medium";
+  const stop = $("#liveStop");
+  stop.classList.toggle("hidden", !["recording", "waiting", "starting"].includes(st));
+  stop.onclick = async () => { try { currentJob = await api(`/api/jobs/${j.id}/stop`, { method: "POST", body: {} }); renderJob(false); } catch (e) { toast(e.message, 1); } };
+  // sparkline
+  const cv = $("#spark"), ctx = cv.getContext("2d");
+  cv.width = cv.clientWidth * devicePixelRatio; cv.height = 70 * devicePixelRatio;
+  const W = cv.width, H = cv.height, d = L.spark || [];
+  ctx.clearRect(0, 0, W, H);
+  const thr = { low: 3.2, medium: 2.4, high: 1.7 }[j.settings.live_sens || "medium"];
+  const max = Math.max(thr * 1.4, ...d), min = Math.min(-1, ...d);
+  const y = v => H - 6 - (v - min) / (max - min) * (H - 12);
+  ctx.strokeStyle = "rgba(255,90,106,.6)"; ctx.setLineDash([6, 6]); ctx.lineWidth = devicePixelRatio;
+  ctx.beginPath(); ctx.moveTo(0, y(thr)); ctx.lineTo(W, y(thr)); ctx.stroke(); ctx.setLineDash([]);
+  if (d.length > 1) {
+    ctx.beginPath();
+    d.forEach((v, i) => { const x = i / (d.length - 1) * W; i ? ctx.lineTo(x, y(v)) : ctx.moveTo(x, y(v)); });
+    ctx.strokeStyle = "#ffd60a"; ctx.lineWidth = 2 * devicePixelRatio; ctx.stroke();
+    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath(); ctx.fillStyle = "rgba(255,214,10,.10)"; ctx.fill();
+  }
 }

@@ -13,9 +13,13 @@ import captions
 import pipeline as P
 import render as R
 import facecam
+import effects as FX
+import highlights as HL
+import live as LV
 
 PORT = int(__import__("os").environ.get("PORT", 8765))
 LOCK = threading.RLock()
+LIVE = {}                       # job id -> live.LiveSession
 WORK = queue.Queue()
 JOBS = {}
 
@@ -39,6 +43,9 @@ def load_all():
     for f in C.JOBS.glob("*/job.json"):
         try:
             j = json.loads(f.read_text(encoding="utf-8"))
+            if j.get("type") == "live" and j["status"] == "live":   # session can't survive a restart
+                j["status"] = "done"
+                j.setdefault("live", {})["state"] = "ended"
             if j["status"] in ("queued", "working"):     # interrupted by a restart
                 j["status"], j["error"] = "error", "Server restarted while this was running — press Retry."
             for o in j.get("outputs", {}).values():
@@ -59,7 +66,7 @@ def log(job, msg):
 def source_dir(job):
     s = job["source"]
     if s["type"] == "url":
-        vid = P.youtube_id(s["url"]) or slug(s["url"])[-20:]
+        vid = P.video_id(s["url"])
         return C.ROOT / "raw" / vid
     return C.UPLOADS / s["upload_id"]
 
@@ -76,7 +83,7 @@ def do_analyze(job):
     d = source_dir(job)
     s = job["source"]
     if s["type"] == "url":
-        src = P.fetch_youtube(s["url"], d, lambda m: log(job, m))
+        src = P.fetch_youtube(s["url"], d, lambda m: log(job, m), stream=is_stream(job))
         t = d / "title.txt"
         if t.exists():
             job["title"] = t.read_text(encoding="utf-8").strip()
@@ -94,17 +101,36 @@ def do_analyze(job):
         raise P.PipelineError("That file has no video stream.")
     job["info"] = info
     log(job, f"Source: {info['width']}×{info['height']}, {info['duration'] / 60:.1f} min")
-    if job["settings"].get("layout") == "stream":
+    if job["settings"].get("layout") in ("stream", "auto"):
         run_detect(job, src)
+        if job["settings"].get("layout") == "auto":   # facecam -> Streamer cam, else whole frame on blur
+            found = (job.get("facecam") or {}).get("found")
+            job["settings"]["layout"] = "stream" if found else "fit"
+            log(job, "Layout: Streamer cam (facecam found)." if found else
+                "Layout: Fit + blur (no facecam found — keeps the whole gameplay frame).")
     words = P.transcribe(src, d, lambda m: log(job, m))
     if len(words) < 20:
         raise P.PipelineError("Hardly any speech found — this video needs someone talking.")
     st = job["settings"]
+    cands = None
+    if is_stream(job):
+        loud = P.ensure_loudness(src, d, lambda m: log(job, m))
+        log(job, "Scanning the stream for hype: audio spikes, chat bursts, reactions…")
+        cands, parts = HL.candidates(words, P.sentences(words), loud, d, info["duration"],
+                                     int(st["count"]), float(st["min_len"]), float(st["max_len"]))
+        chat = parts.get("chat_total", 0)
+        log(job, f"Found {len(cands)} hype peaks" + (f" (using {chat:,} chat messages)." if chat else
+                                                       " (no chat replay — audio and reactions only)."))
     clips = P.pick_moments(words, int(st["count"]), float(st["min_len"]), float(st["max_len"]),
-                           bool(st.get("ai_pick", True)), lambda m: log(job, m), job.get("title", ""))
+                           bool(st.get("ai_pick", True)), lambda m: log(job, m), job.get("title", ""), cands=cands)
     job["clips"] = clips
     job["status"] = "ready"
     log(job, f"Found {len(clips)} moments — review them and hit Render.")
+
+
+def is_stream(job):
+    s = job["source"]
+    return job["settings"].get("mode") == "stream" or (s["type"] == "url" and P.platform(s["url"]) in ("twitch", "kick"))
 
 
 def run_detect(job, src=None):
@@ -170,7 +196,8 @@ def write_meta(job, force=False):
 
 
 def sig(job, c):
-    return json.dumps([c["start"], c["end"], c["title"], job["settings"]], sort_keys=True)
+    return json.dumps([c["start"], c["end"], c["title"], c.get("hook_text"), c.get("keywords"), c.get("emojis"),
+                       job["settings"]], sort_keys=True)
 
 
 def worker():
@@ -196,7 +223,8 @@ def worker():
 
 # ------------------------------------------------------------------ helpers
 DEFAULT_SETTINGS = dict(count=5, min_len=30, max_len=40, ai_pick=True, layout="split", gameplay="mix",
-                        avoid_burned=True, position="auto", preset="pop", style=dict(captions.PRESETS["pop"]), seed=7)
+                        avoid_burned=True, position="auto", preset="pop", style=dict(captions.PRESETS["pop"]), seed=7,
+                        polish=dict(FX.DEFAULT_POLISH))
 
 
 def gameplay_list():
@@ -295,7 +323,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))
-        self.send_header("Cache-Control", "max-age=3600" if cache else "no-cache")
+        self.send_header("Cache-Control", "max-age=3600" if cache else "no-store")
         self.end_headers()
         if self.command == "HEAD":
             return
@@ -358,9 +386,15 @@ class H(BaseHTTPRequestHandler):
         if p.startswith("/media/data/"):
             return self.send_file(safe(C.DATA, p[12:]))
         if p == "/api/state":
+            logo = C.BRAND / "clipforge-logo.png"
             return self.send_json({"gameplay": gameplay_list(), "presets": captions.PRESETS,
                                    "fonts": list(captions.FONTS), "positions": list(captions.POSITIONS) + ["auto"],
-                                   "defaults": DEFAULT_SETTINGS, "cookies": C.COOKIES.exists()})
+                                   "defaults": DEFAULT_SETTINGS, "cookies": C.COOKIES.exists(),
+                                   "music": [{"name": m.name, "size_mb": round(m.stat().st_size / 1e6, 1)}
+                                             for m in R.music_files()],
+                                   "logo": f"/api/brand-logo?v={int(logo.stat().st_mtime)}" if logo.exists() else None})
+        if p == "/api/brand-logo":
+            return self.send_file(C.BRAND / "clipforge-logo.png")
         if p.startswith("/api/gameplay-thumb/"):
             return self.send_file(gameplay_thumb(safe(C.GAMEPLAY, p[20:]).name))
         if p == "/api/jobs":
@@ -396,14 +430,56 @@ class H(BaseHTTPRequestHandler):
                     k += 1
                 self.save_body(dest)
                 return self.send_json({"ok": True, "name": dest.name})
+            if p == "/api/music":
+                name = Path(unquote(self.headers.get("X-Filename", "music.mp3"))).name
+                if Path(name).suffix.lower() not in C.AUDIO_EXT:
+                    return self.err("Unsupported audio type (mp3, wav, m4a, aac, ogg, flac)")
+                dest = C.MUSIC / name
+                k = 1
+                while dest.exists():
+                    dest = C.MUSIC / f"{Path(name).stem} ({k}){Path(name).suffix}"
+                    k += 1
+                self.save_body(dest)
+                return self.send_json({"ok": True, "name": dest.name})
+            if p == "/api/brand-logo":
+                tmp = C.BRAND / "logo-upload.tmp"
+                self.save_body(tmp)
+                r = subprocess.run([C.FFMPEG, "-v", "error", "-y", "-i", str(tmp), "-vf",
+                                    "scale='min(600,iw)':-1,format=rgba", "-frames:v", "1",
+                                    str(C.BRAND / "clipforge-logo.png")], capture_output=True, text=True)
+                tmp.unlink(missing_ok=True)
+                if r.returncode != 0:
+                    return self.err("Couldn't read that image — use PNG or JPG.")
+                return self.send_json({"ok": True})
             if p == "/api/style-preview":
                 return self.send_json({"url": style_preview(self.body_json())})
+            if p == "/api/live":
+                b = self.body_json()
+                url = (b.get("url") or "").strip()
+                if not P.supported_url(url):
+                    return self.err("Use a Twitch, Kick or YouTube live link.")
+                if any(s.is_alive() for s in LIVE.values()):
+                    return self.err("A live session is already running — stop it first.")
+                jid = uuid.uuid4().hex[:8]
+                chan = __import__("livechat").channel_of(url, P.platform(url))
+                job = {"id": jid, "type": "live", "created": time.time(), "source": {"type": "url", "url": url},
+                       "title": f"LIVE · {chan or P.platform(url)}", "status": "live", "stage": "Starting…", "log": [],
+                       "error": None, "clips": [], "outputs": {},
+                       "settings": {**DEFAULT_SETTINGS, **(b.get("settings") or {}), "mode": "stream"},
+                       "live": {"state": "starting", "platform": P.platform(url), "recorded": 0, "chat_rate": 0,
+                                "spark": [], "started": time.time()}}
+                JOBS[jid] = job
+                save(job)
+                sess = LV.LiveSession(job, save, lambda m, j=job: log(j, m))
+                LIVE[jid] = sess
+                sess.start()
+                return self.send_json(job)
             if p == "/api/jobs":
                 b = self.body_json()
                 src = b.get("source") or {}
                 if src.get("type") == "url":
-                    if not P.youtube_id(src.get("url", "")):
-                        return self.err("That doesn't look like a YouTube link.")
+                    if not P.supported_url(src.get("url", "")):
+                        return self.err("Use a YouTube, Twitch or Kick link.")
                 elif src.get("type") == "upload":
                     if not (C.UPLOADS / src.get("upload_id", "_")).exists():
                         return self.err("Upload not found.")
@@ -427,6 +503,15 @@ class H(BaseHTTPRequestHandler):
                 if not job:
                     return self.err("no such job", 404)
                 act = m.group(2)
+                if act == "stop":
+                    sess = LIVE.get(job["id"])
+                    if sess and sess.is_alive():
+                        sess.stop()
+                        job["live"]["state"] = "stopping"
+                        log(job, "Stopping — finishing the last chunk…")
+                    return self.send_json(job)
+                if job.get("type") == "live" and act in ("render", "retry", "meta", "detect"):
+                    return self.err("Live clips are rendered automatically as they happen.")
                 b = self.body_json()
                 if job["status"] in ("queued", "working") and act in ("render", "update", "retry"):
                     return self.err("This job is busy — wait for it to finish.")
@@ -441,6 +526,7 @@ class H(BaseHTTPRequestHandler):
                                     t = byid[c["id"]]
                                     t["selected"] = bool(c.get("selected", t["selected"]))
                                     t["title"] = str(c.get("title", t["title"]))[:100]
+                                    t["hook_text"] = str(c.get("hook_text", t.get("hook_text", "")))[:60]
                                     t["start"] = round(float(c.get("start", t["start"])), 2)
                                     t["end"] = round(max(float(c.get("end", t["end"])), t["start"] + 3), 2)
                         save(job)
@@ -488,6 +574,10 @@ class H(BaseHTTPRequestHandler):
                     WORK.put((job["id"], "meta"))
                     return self.send_json(job)
                 if act == "delete":
+                    sess = LIVE.pop(job["id"], None)
+                    if sess and sess.is_alive():
+                        sess.stop()
+                        sess.join(timeout=20)
                     JOBS.pop(job["id"], None)
                     shutil.rmtree(C.JOBS / job["id"], ignore_errors=True)
                     return self.send_json({"ok": True})
@@ -506,6 +596,18 @@ class H(BaseHTTPRequestHandler):
                 trash = C.DATA / "gameplay-trash"
                 trash.mkdir(exist_ok=True)
                 shutil.move(str(f), str(trash / f.name))      # recoverable, not deleted
+            return self.send_json({"ok": True})
+        if p.startswith("/api/music/"):
+            f = safe(C.MUSIC, p[11:])
+            if f.exists():
+                trash = C.DATA / "music-trash"
+                trash.mkdir(exist_ok=True)
+                shutil.move(str(f), str(trash / f.name))      # recoverable, not deleted
+            return self.send_json({"ok": True})
+        if p == "/api/brand-logo":
+            f = C.BRAND / "clipforge-logo.png"
+            if f.exists():
+                f.replace(C.DATA / "logo-removed.png")       # recoverable
             return self.send_json({"ok": True})
         self.err("not found", 404)
 

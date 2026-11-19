@@ -27,23 +27,56 @@ def probe(path):
 
 
 def youtube_id(url):
-    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([A-Za-z0-9_-]{11})", url)
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([A-Za-z0-9_-]{11})", url)
     return m.group(1) if m else None
 
 
-def fetch_youtube(url, dest_dir: Path, log):
+def platform(url):
+    u = url.lower()
+    if "youtu.be/" in u or "youtube.com/" in u:
+        return "youtube"
+    if "twitch.tv/" in u:
+        return "twitch"
+    if "kick.com/" in u:
+        return "kick"
+    return None
+
+
+def video_id(url):
+    """Stable folder name for a link (YouTube id, twitch-<vod>, kick-<id>)."""
+    if platform(url) == "youtube":
+        return youtube_id(url)
+    m = re.search(r"twitch\.tv/videos/(\d+)", url) or re.search(r"twitch\.tv/\w+/clip/([\w-]+)", url) \
+        or re.search(r"clips\.twitch\.tv/([\w-]+)", url)
+    if m:
+        return "twitch-" + m.group(1)
+    m = re.search(r"kick\.com/[\w-]+/(?:videos|clips)/([\w-]+)", url) or re.search(r"kick\.com/video/([\w-]+)", url)
+    if m:
+        return "kick-" + m.group(1)
+    return "link-" + re.sub(r"[^a-zA-Z0-9]+", "-", url)[-40:].strip("-")
+
+
+def supported_url(url):
+    return platform(url) is not None
+
+
+def fetch_youtube(url, dest_dir: Path, log, stream=False):
+    """Download any supported link (YouTube / Twitch / Kick). stream=True also grabs the chat replay."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     out = dest_dir / "source.mp4"
     if out.exists() and out.stat().st_size > 0:
         log("Source already downloaded — reusing it.")
         return out
-    cmd = [C.YTDLP, "--no-playlist", "-S", "vcodec:h264,res:1080,acodec:m4a",
+    site = {"youtube": "YouTube", "twitch": "Twitch", "kick": "Kick"}.get(platform(url), "the web")
+    cmd = [C.YTDLP, "--no-playlist", "-S", "vcodec:h264,res:1080,fps:30,acodec:m4a",
            "--merge-output-format", "mp4", "-o", str(dest_dir / "source.%(ext)s")]
+    if stream:   # chat replay powers hype detection (YouTube live_chat, Twitch rechat)
+        cmd += ["--write-subs", "--sub-langs", "live_chat,rechat", "--ignore-errors"]
     if C.COOKIES.exists():
         cmd += ["--cookies", str(C.COOKIES)]
-        log("Using cookies.txt for YouTube.")
+        log("Using cookies.txt.")
     cmd.append(url)
-    log("Downloading from YouTube…")
+    log(f"Downloading from {site}…" + (" (long streams can take a while)" if stream else ""))
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0 or not out.exists():
         err = p.stderr or p.stdout
@@ -71,11 +104,42 @@ def transcribe(src: Path, work: Path, log):
     log("Extracting audio…")
     run([C.FFMPEG, "-v", "error", "-y", *C.FF_THREADS, "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
          "-c:a", "pcm_s16le", str(wav)])
+    loudness_curve(wav, work)                # cheap, reused by stream hype detection
     log("Transcribing word by word (whisper on GPU)…")
     run([str(C.WHISPER_CLI), "-m", C.WHISPER_MODEL, "-f", str(wav), "-ml", "1", "-sow", "-oj",
          "-of", str(work / "words"), "-l", "en"])
     wav.unlink(missing_ok=True)
     return load_words(words_json)
+
+
+def loudness_curve(wav: Path, work: Path, step=0.5):
+    """RMS loudness (dB) every `step` seconds of a 16 kHz mono wav -> loud.json. Streams through the file."""
+    import wave
+    import numpy as np
+    out = []
+    with wave.open(str(wav), "rb") as w:
+        n = int(w.getframerate() * step)
+        while True:
+            buf = w.readframes(n)
+            if not buf:
+                break
+            a = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+            out.append(round(float(20 * np.log10(np.sqrt(np.mean(a * a)) + 1e-6)), 1))
+    (work / "loud.json").write_text(json.dumps({"step": step, "db": out}), encoding="utf-8")
+    return out
+
+
+def ensure_loudness(src: Path, work: Path, log):
+    f = work / "loud.json"
+    if f.exists():
+        return json.loads(f.read_text(encoding="utf-8"))
+    wav = work / "audio_loud.wav"
+    log("Measuring audio energy…")
+    run([C.FFMPEG, "-v", "error", "-y", *C.FF_THREADS, "-i", str(src), "-vn", "-ac", "1", "-ar", "16000",
+         "-c:a", "pcm_s16le", str(wav)])
+    loudness_curve(wav, work)
+    wav.unlink(missing_ok=True)
+    return json.loads(f.read_text(encoding="utf-8"))
 
 
 def load_words(path):
@@ -166,29 +230,116 @@ def heuristic_moments(sents, n, lo, hi):
         if len(picked) >= n:
             break
     out = []
+    top = max((p[0] for p in picked), default=1) or 1
     for score, i, j in sorted(picked, key=lambda x: x[1]):
         first = sents[i]["text"]
+        text = " ".join(s["text"] for s in sents[i:j + 1])
+        reasons = []
+        ft = re.findall(r"[a-z']+", first.lower())
+        if any(t in HOOK for t in ft):
+            reasons.append("hook words in the opening line")
+        if "?" in first:
+            reasons.append("opens with a question")
+        if ft and ft[0] in {"and", "but", "so", "or", "because", "which"}:
+            reasons.append("weak opening (starts mid-thought)")
+        if re.search(r"\d", text):
+            reasons.append("specific numbers")
         out.append({"first": i, "last": j, "title": first[:60].rstrip(",. ") + ("…" if len(first) > 60 else ""),
-                    "hook": "Auto-picked (keyword + energy score)"})
+                    "hook": "Auto-picked (keyword + energy score)",
+                    "score": int(45 + 45 * score / top), "reasons": reasons or ["steady pacing"],
+                    "hook_text": hook_from(first), "keywords": keywords_from(text), "emojis": emojis_from(text),
+                    "loop": False})
     return out
 
 
-def ai_moments(sents, n, lo, hi, log, title=""):
-    lines = "\n".join(f"[{k}] ({s['s']:.1f}-{s['e']:.1f}s) {s['text']}" for k, s in enumerate(sents))
+STOPWORDS = set("""the a an and or but so to of in on at for with from by is are was were be been being it its it's this
+that these those you your i me my we our they them their he she his her as if then than there here what when where
+which who whom how why will would can could should just also very really going gonna get got have has had do does did
+not no yes all any some more most other into about over after before up down out off again only even like well""".split())
+EMOJI_MAP = {"money": "💰", "cash": "💰", "rich": "💰", "dollar": "💰", "car": "🚗", "cars": "🚗", "race": "🏎️",
+             "races": "🏎️", "police": "🚨", "cops": "🚨", "cop": "🚨", "dog": "🐶", "dogs": "🐶", "pet": "🐶",
+             "pets": "🐶", "poop": "💩", "fire": "🔥", "gun": "🔫", "guns": "🔫", "weapon": "🔫", "crazy": "🤯",
+             "insane": "🤯", "map": "🗺️", "world": "🌍", "phone": "📱", "viral": "📱", "date": "❤️", "dates": "❤️",
+             "love": "❤️", "gym": "💪", "fat": "🍔", "food": "🍔", "sleep": "😴", "dead": "💀", "kill": "💀",
+             "killed": "💀", "fish": "🐟", "fishing": "🎣", "animal": "🐊", "animals": "🐊", "game": "🎮",
+             "games": "🎮", "secret": "🤫", "hidden": "👀", "free": "🆓", "fast": "⚡", "speed": "⚡", "win": "🏆",
+             "best": "🏆", "time": "⏰", "computer": "💻", "pc": "💻", "ai": "🤖", "robot": "🤖", "laugh": "😂",
+             "funny": "😂", "heist": "💎", "steal": "🦹", "stole": "🦹", "stolen": "🦹", "boat": "🚤", "water": "🌊"}
+
+
+def hook_from(sentence):
+    words = re.findall(r"[A-Za-z0-9']+", sentence)
+    return " ".join(words[:6]).upper()
+
+
+def keywords_from(text, n=8):
+    toks = re.findall(r"[A-Za-z][A-Za-z0-9']{3,}", text)
+    seen, out = set(), []
+    for t in sorted(toks, key=lambda t: (-len(t), toks.index(t))):
+        k = t.lower()
+        if k in STOPWORDS or k in seen:
+            continue
+        seen.add(k)
+        out.append(k)
+        if len(out) >= n:
+            break
+    out += [m for m in re.findall(r"\d[\d,.%]*", text)][:3]
+    return out
+
+
+def emojis_from(text, n=4):
+    out, seen = [], set()
+    for t in re.findall(r"[A-Za-z]+", text.lower()):
+        if t in EMOJI_MAP and EMOJI_MAP[t] not in seen:
+            seen.add(EMOJI_MAP[t])
+            out.append({"word": t, "emoji": EMOJI_MAP[t]})
+            if len(out) >= n:
+                break
+    return out
+
+
+def ai_moments(sents, n, lo, hi, log, title="", cands=None):
+    if cands:   # stream mode: only the hype candidates (keeps multi-hour VODs within one prompt)
+        blocks = []
+        for k, c in enumerate(cands):
+            a, b = max(0, c["first"] - 2), min(len(sents) - 1, c["last"] + 2)
+            body = "\n".join(f"[{i}] ({sents[i]['s']:.1f}-{sents[i]['e']:.1f}s) {sents[i]['text']}" for i in range(a, b + 1))
+            blocks.append(f"### CANDIDATE {k + 1} — hype {c['hype']} ({', '.join(c['signals'])}); "
+                          f"peak at {c['peak']}s; suggested span [{c['first']}..{c['last']}]\n{body}")
+        lines = "\n\n".join(blocks)
+        intro = ("This is a LIVE STREAM VOD. Below are hype CANDIDATES found from audio spikes, chat bursts and the "
+                 "streamer's reactions. Each lists numbered sentences (with a little context either side).\n"
+                 "Streams are about reactions: favour funny moments, rage, clutch plays, shocking reveals and chat "
+                 "going wild — the build-up must be included so a stranger understands the payoff.\n"
+                 "Use the global sentence numbers shown. You may widen or narrow a candidate's span.")
+    else:
+        lines = "\n".join(f"[{k}] ({s['s']:.1f}-{s['e']:.1f}s) {s['text']}" for k, s in enumerate(sents))
+        intro = "Below is the full transcript split into numbered sentences with timestamps."
     prompt = f"""You are a top short-form video editor (TikTok / YouTube Shorts / Reels).
 Video title: {title or 'unknown'}
-Below is the full transcript split into numbered sentences with timestamps.
+{intro}
 
 Pick the {n} BEST moments to post as standalone vertical clips. Rules:
 - Each clip is a contiguous span of sentences [first..last], total length between {lo} and {hi} seconds (last.end - first.start).
 - It must make sense with zero context: open on a strong hook (a surprising claim, question, or vivid detail) — never open on "And", "So", "But" mid-thought.
 - It must end on a complete, satisfying thought (payoff/punchline), not mid-explanation.
 - No overlaps. Skip intros, sponsor reads, "like and subscribe" outros.
+- Prefer endings that LOOP: a last line that flows naturally back into the first line when the clip replays.
 - Rank from strongest to weakest.
-- title: a punchy Shorts title (max 60 chars, can use 1 emoji). hook: one short line on why it works.
+
+For each clip return:
+- title: punchy Shorts title (max 60 chars, can use 1 emoji)
+- hook: one short line on why it works
+- score: 0-100 virality score (hook strength in first 3 s, curiosity, payoff, emotion, standalone clarity)
+- reasons: 2-4 very short strings explaining the score (include one weakness if any)
+- hook_text: on-screen hook title shown in the first 2.5 s, max 6 words, ALL CAPS, curiosity-driven, no emoji
+- keywords: 4-10 single words FROM THE CLIP's own transcript that deserve visual emphasis (names, numbers, punchlines)
+- emojis: 2-5 objects {{"word": "<a word that appears in the clip>", "emoji": "<one emoji>"}} for concrete nouns/feelings
+- loop: true if the ending flows back into the opening
 
 Return ONLY a JSON array, no prose, no code fences:
-[{{"first": 12, "last": 19, "title": "...", "hook": "..."}}]
+[{{"first": 12, "last": 19, "title": "...", "hook": "...", "score": 82, "reasons": ["..."], "hook_text": "...",
+  "keywords": ["..."], "emojis": [{{"word": "car", "emoji": "🚗"}}], "loop": false}}]
 
 TRANSCRIPT:
 {lines}
@@ -206,24 +357,55 @@ TRANSCRIPT:
         i, j = int(x["first"]), int(x["last"])
         if not (0 <= i <= j < len(sents)):
             continue
-        out.append({"first": i, "last": j, "title": str(x.get("title", ""))[:80], "hook": str(x.get("hook", ""))})
+        text = " ".join(s["text"] for s in sents[i:j + 1])
+        emo = [e for e in (x.get("emojis") or []) if isinstance(e, dict) and e.get("word") and e.get("emoji")]
+        out.append({"first": i, "last": j, "title": str(x.get("title", ""))[:80], "hook": str(x.get("hook", "")),
+                    "score": max(0, min(100, int(x.get("score", 60) or 60))),
+                    "reasons": [str(r)[:80] for r in (x.get("reasons") or [])][:4],
+                    "hook_text": str(x.get("hook_text") or hook_from(sents[i]["text"]))[:48].upper(),
+                    "keywords": [str(k).lower().strip(".,!?") for k in (x.get("keywords") or keywords_from(text))][:12],
+                    "emojis": [{"word": str(e["word"]).lower(), "emoji": str(e["emoji"])[:8]} for e in emo][:6]
+                              or emojis_from(text),
+                    "loop": bool(x.get("loop"))})
     if not out:
         raise PipelineError("Claude returned no usable moments")
     return out
 
 
-def pick_moments(words, n, lo, hi, use_ai, log, title=""):
+def stream_fallback(sents, cands, total):
+    """No AI: rank hype candidates by their hype score."""
+    top = max((c["hype"] for c in cands), default=1) or 1
+    out = []
+    for c in sorted(cands, key=lambda c: -c["hype"])[:total]:
+        text = " ".join(s["text"] for s in sents[c["first"]:c["last"] + 1])
+        out.append({"first": c["first"], "last": c["last"], "title": hook_from(text).title()[:60],
+                    "hook": "Hype moment: " + ", ".join(c["signals"]),
+                    "score": int(50 + 45 * c["hype"] / top), "reasons": c["signals"],
+                    "hook_text": hook_from(sents[c["first"]]["text"]), "keywords": keywords_from(text),
+                    "emojis": emojis_from(text), "loop": False})
+    return sorted(out, key=lambda p: p["first"])
+
+
+def pick_moments(words, n, lo, hi, use_ai, log, title="", cands=None):
     sents = sentences(words)
     total = n + 3          # a few spares the user can swap in
     picks = None
+    if cands is not None and not cands:
+        log("No clear hype peaks found — falling back to the transcript picker.")
+        cands = None
     if use_ai:
         try:
-            picks = ai_moments(sents, total, lo, hi, log, title)
+            picks = ai_moments(sents, total, lo, hi, log, title, cands=cands)
         except Exception as e:  # fall back, never fail the job here
             log(f"AI picker unavailable ({str(e)[:120]}) — using the built-in scorer.")
     if not picks:
         log("Scoring moments with the built-in picker…")
-        picks = heuristic_moments(sents, total, lo, hi)
+        picks = stream_fallback(sents, cands, total) if cands else heuristic_moments(sents, total, lo, hi)
+    if cands:   # surface the hype signals that led to each pick
+        for p in picks:
+            hit = next((c for c in cands if not (p["last"] < c["first"] or p["first"] > c["last"])), None)
+            if hit:
+                p["reasons"] = list(dict.fromkeys(["⚡ " + s for s in hit["signals"]] + (p.get("reasons") or [])))[:5]
     clips, used = [], []
     for k, p in enumerate(picks):
         i, j = fit_window(sents, p["first"], p["last"], lo, hi)
@@ -236,6 +418,8 @@ def pick_moments(words, n, lo, hi, use_ai, log, title=""):
             "end": round(sents[j]["e"], 2),
             "title": p["title"],
             "hook": p["hook"],
+            "score": p.get("score", 60), "reasons": p.get("reasons", []), "hook_text": p.get("hook_text", ""),
+            "keywords": p.get("keywords", []), "emojis": p.get("emojis", []), "loop": p.get("loop", False),
             "text": " ".join(s["text"] for s in sents[i:j + 1]),
             "selected": len(clips) < n,
         })

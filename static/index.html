@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ClipForge</title>
-<link rel="stylesheet" href="/static/style.css?v=4">
+<link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
 <aside class="side">
@@ -28,15 +28,24 @@
       <div class="tabs" id="srcTabs">
         <button class="tab on" data-t="url">YouTube link</button>
         <button class="tab" data-t="upload">Upload a file</button>
+        <button class="tab" data-t="live">🔴 Live stream</button>
       </div>
       <div id="srcUrl" class="src-pane">
-        <input id="urlIn" class="input big" placeholder="https://youtu.be/…" autocomplete="off">
+        <textarea id="urlIn" class="input big" rows="2" placeholder="YouTube, Twitch or Kick link…   (paste several, one per line, to batch them)" autocomplete="off"></textarea>
         <p class="hint" id="cookieHint"></p>
+      </div>
+      <label class="toggle"><input type="checkbox" id="streamMode"><span></span><b>Stream VOD mode</b>&nbsp;<span class="muted">— finds hype moments from audio spikes, chat bursts and reactions; handles multi-hour streams</span></label>
+      <div id="srcLive" class="src-pane hidden">
+        <input id="liveIn" class="input big" placeholder="twitch.tv/channel · kick.com/channel · youtube.com/@channel/live" autocomplete="off">
+        <div class="row gap wrap live-opts">
+          <label class="inline">Sensitivity <select id="liveSens"><option value="low">Low — only huge moments</option><option value="medium" selected>Medium</option><option value="high">High — more clips</option></select></label>
+          <span class="muted small">ClipForge records the stream, reads chat live, and auto-renders a clip every time hype spikes. Keep this PC on while it watches.</span>
+        </div>
       </div>
       <div id="srcUpload" class="src-pane hidden">
         <label class="drop" id="drop">
-          <input type="file" id="fileIn" accept="video/*" hidden>
-          <div class="drop-in"><div class="drop-icon">⬆</div><div><b>Drop a video here</b> or click to choose</div><div class="muted small">MP4, MOV, MKV, WEBM</div></div>
+          <input type="file" id="fileIn" accept="video/*" hidden multiple>
+          <div class="drop-in"><div class="drop-icon">⬆</div><div><b>Drop videos here</b> or click to choose</div><div class="muted small">Several files = several projects (batch)</div><div class="muted small">MP4, MOV, MKV, WEBM</div></div>
         </label>
         <div id="upState" class="upstate hidden"><div class="bar"><i id="upBar"></i></div><span id="upText"></span></div>
       </div>
@@ -47,6 +56,7 @@
       <div class="card-head"><span class="step">2</span><h2>Layout & gameplay</h2></div>
       <div class="layouts" id="layouts">
         <button class="layout on" data-l="split"><div class="lp split"><i></i><i></i></div><b>Split + gameplay</b><span>Speaker top, gameplay bottom</span></button>
+        <button class="layout" data-l="auto"><div class="lp auto"><i></i><i></i></div><b>Auto</b><span>Facecam → Streamer cam, else Fit</span></button>
         <button class="layout" data-l="stream"><div class="lp stream"><i></i><i></i></div><b>Streamer cam</b><span>Their facecam top, their gameplay bottom</span></button>
         <button class="layout" data-l="full"><div class="lp full"><i></i></div><b>Full vertical</b><span>Center-cropped 9:16</span></button>
         <button class="layout" data-l="fit"><div class="lp fit"><i></i></div><b>Fit + blur</b><span>Whole frame on blurred fill</span></button>
@@ -109,6 +119,12 @@
       <label class="toggle"><input type="checkbox" id="eAi" checked><span></span>AI moment picker (Claude reads the transcript and picks hooks with a payoff)</label>
     </div>
 
+    <!-- 5 polish -->
+    <div class="card">
+      <div class="card-head"><span class="step">5</span><h2>Polish</h2><span class="muted small">jump cuts · zooms · emojis · sound · branding</span></div>
+      <div id="polishNew"></div>
+    </div>
+
     <div class="go-row">
       <span class="muted" id="goHint"></span>
       <button class="btn primary big" id="goBtn">Find the best moments →</button>
@@ -122,13 +138,27 @@
       <div class="row gap"><button class="btn small ghost hidden" id="retryBtn">Retry</button><button class="btn small ghost danger" id="delBtn">Delete</button></div>
     </header>
 
+    <div class="card hidden" id="liveCard">
+      <div class="row between wrap">
+        <div class="row gap"><span class="live-pill" id="livePill">● LIVE</span><b id="liveState"></b></div>
+        <button class="btn small danger" id="liveStop">■ Stop watching</button>
+      </div>
+      <div class="live-stats">
+        <div><span>Recorded</span><b id="lsRec">0:00</b></div>
+        <div><span>Chat</span><b id="lsChat">–</b></div>
+        <div><span>Clips</span><b id="lsClips">0</b></div>
+        <div><span>Sensitivity</span><b id="lsSens">medium</b></div>
+      </div>
+      <div class="spark-wrap"><span class="muted small">Hype (last 3 min) — spikes above the line become clips</span><canvas id="spark" height="70"></canvas></div>
+    </div>
+
     <div class="card" id="progCard">
       <div class="prog"><div class="spinner" id="spin"></div><div><b id="jStage"></b><div class="log" id="jLog"></div></div></div>
       <div class="error hidden" id="jErr"></div>
     </div>
 
     <div id="clipsBlock" class="hidden">
-      <div class="card">
+      <div class="card" id="momentsCard">
         <div class="row between wrap">
           <h2>Moments <span class="muted small" id="selCount"></span></h2>
           <div class="row gap wrap">
@@ -138,6 +168,7 @@
             <label class="inline" id="jGpWrap">Gameplay <select id="jGp"></select></label>
           </div>
         </div>
+        <details class="custom polish-job"><summary>Polish — jump cuts, zooms, emojis, sound, branding</summary><div id="polishJob"></div></details>
         <div id="clips" class="clips"></div>
         <div class="go-row"><span class="muted small" id="renderHint"></span><button class="btn primary big" id="renderBtn">Render selected clips →</button></div>
       </div>
@@ -168,6 +199,6 @@
 
 <div class="modal hidden" id="modal"><div class="modal-in"><img id="modalImg" alt=""><button class="btn small ghost" id="modalX">Close</button></div></div>
 <div class="toast hidden" id="toast"></div>
-<script src="/static/app.js?v=4"></script>
+<script src="/static/app.js?v=7"></script>
 </body>
 </html>
