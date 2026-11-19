@@ -248,6 +248,7 @@ function renderPolish(box, pol, onChange) {
       <label class="f">Punch-in zooms<select data-k="zoom">${["off", "subtle", "punchy"].map(z => `<option ${z === pol.zoom ? "selected" : ""}>${z}</option>`).join("")}</select></label>
     </div>
     <div class="pol-group"><h4>Emphasis</h4>
+      ${tg("cold_open", "Cold open — flash the best line first")}
       ${tg("hook_title", "Hook title in the first seconds")}
       ${tg("hero", "Hero words in their own color")}
       ${tg("emojis", "Emoji pops on key words")}
@@ -466,6 +467,7 @@ function renderClipEditor() {
         <div class="hook">${esc(c.hook || "")}${c.loop ? ' <span class="loop">· ↻ loops</span>' : ""}</div>
         ${(c.reasons || []).length ? `<div class="reasons">${c.reasons.map(r => `<span>• ${esc(r)}</span>`).join("")}</div>` : ""}
         <div class="hk"><span>Hook title</span><input class="input hkIn" value="${esc(c.hook_text || "")}" maxlength="60" placeholder="ON-SCREEN HOOK"></div>
+        <div class="hk"><span>Cold open</span><input class="input tzIn" value="${esc(c.tease || "")}" maxlength="160" placeholder="exact words to flash first (blank = none)"></div>
         <div class="txt">${esc(c.text)}</div>
         ${((c.keywords || []).length || (c.emojis || []).length) ? `<div class="chips">${(c.emojis || []).map(e => `<i>${esc(e.emoji)} ${esc(e.word)}</i>`).join("")}${(c.keywords || []).slice(0, 8).map(k => `<i>${esc(k)}</i>`).join("")}</div>` : ""}</div>
       <div class="times">
@@ -485,6 +487,7 @@ function renderClipEditor() {
     $("input[type=checkbox]", el).onchange = e => { c.selected = e.target.checked; upd(); };
     $(".ttl", el).onchange = e => { c.title = e.target.value; pushClips(); };
     $(".hkIn", el).onchange = e => { c.hook_text = e.target.value.toUpperCase(); e.target.value = c.hook_text; pushClips(); };
+    $(".tzIn", el).onchange = e => { c.tease = e.target.value.trim(); pushClips(); };
     $$(".tm button", el).forEach(b => b.onclick = () => { c[b.dataset.f] = Math.round((c[b.dataset.f] + +b.dataset.d) * 100) / 100; upd(); });
     $$(".tm input", el).forEach(i => i.onchange = () => { const v = parseT(i.value); if (!isNaN(v)) c[i.dataset.f] = v; upd(); });
     $(".pv", el).onclick = async e => {

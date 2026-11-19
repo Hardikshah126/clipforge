@@ -298,6 +298,12 @@ def emojis_from(text, n=4):
     return out
 
 
+HOOK_TEXT_RULES = ("Max 7 words, ALL CAPS, no emoji. Open a curiosity gap the clip closes — stakes, conflict, "
+                   "a shocking number or a 'wait, what?' claim (e.g. HE HAD NO IDEA SHE WAS LISTENING, "
+                   "THIS MISTAKE COST HIM $40,000, NOBODY EXPECTED THIS ENDING). Never repeat the first spoken line, "
+                   "never generic (no 'WATCH THIS', 'CRAZY MOMENT', 'MUST SEE'), never give away the payoff.")
+
+
 def ai_moments(sents, n, lo, hi, log, title="", cands=None):
     if cands:   # stream mode: only the hype candidates (keeps multi-hour VODs within one prompt)
         blocks = []
@@ -319,9 +325,14 @@ def ai_moments(sents, n, lo, hi, log, title="", cands=None):
 Video title: {title or 'unknown'}
 {intro}
 
-Pick the {n} BEST moments to post as standalone vertical clips. Rules:
+Pick the {n} BEST moments to post as standalone vertical clips. Viewers decide to swipe in under 1.5 seconds,
+so THE OPENING IS EVERYTHING. Rules:
 - Each clip is a contiguous span of sentences [first..last], total length between {lo} and {hi} seconds (last.end - first.start).
-- It must make sense with zero context: open on a strong hook (a surprising claim, question, or vivid detail) — never open on "And", "So", "But" mid-thought.
+- The FIRST sentence must grab instantly on its own: a bold/controversial claim, a shocking number, a direct
+  question, conflict ("he lied to me"), stakes ("I lost everything"), or the middle of action. Move `first`
+  forward past any warm-up ("so", "okay", "yeah", "basically", "I think", greetings, context-setting) even if it
+  makes the clip shorter. Never open mid-thought on "And"/"But"/"Because".
+- Reject moments whose best line is buried with no way to open strong — a great story with a weak opener loses.
 - It must end on a complete, satisfying thought (payoff/punchline), not mid-explanation.
 - No overlaps. Skip intros, sponsor reads, "like and subscribe" outros.
 - Prefer endings that LOOP: a last line that flows naturally back into the first line when the clip replays.
@@ -332,14 +343,17 @@ For each clip return:
 - hook: one short line on why it works
 - score: 0-100 virality score (hook strength in first 3 s, curiosity, payoff, emotion, standalone clarity)
 - reasons: 2-4 very short strings explaining the score (include one weakness if any)
-- hook_text: on-screen hook title shown in the first 2.5 s, max 6 words, ALL CAPS, curiosity-driven, no emoji
+- hook_text: on-screen hook title shown in the first 2.5 s. {HOOK_TEXT_RULES}
+- tease: the single most shocking/funny/quotable line of the clip, copied WORD FOR WORD from the transcript,
+  4-12 words (about 1.5-4 s spoken), from the second half / payoff. It is flashed as a cold open before the clip
+  starts, so it must make people need to see how it happens — without fully spoiling the ending.
 - keywords: 4-10 single words FROM THE CLIP's own transcript that deserve visual emphasis (names, numbers, punchlines)
 - emojis: 2-5 objects {{"word": "<a word that appears in the clip>", "emoji": "<one emoji>"}} for concrete nouns/feelings
 - loop: true if the ending flows back into the opening
 
 Return ONLY a JSON array, no prose, no code fences:
 [{{"first": 12, "last": 19, "title": "...", "hook": "...", "score": 82, "reasons": ["..."], "hook_text": "...",
-  "keywords": ["..."], "emojis": [{{"word": "car", "emoji": "🚗"}}], "loop": false}}]
+  "tease": "exact words from the clip", "keywords": ["..."], "emojis": [{{"word": "car", "emoji": "🚗"}}], "loop": false}}]
 
 TRANSCRIPT:
 {lines}
@@ -363,6 +377,7 @@ TRANSCRIPT:
                     "score": max(0, min(100, int(x.get("score", 60) or 60))),
                     "reasons": [str(r)[:80] for r in (x.get("reasons") or [])][:4],
                     "hook_text": str(x.get("hook_text") or hook_from(sents[i]["text"]))[:48].upper(),
+                    "tease": str(x.get("tease") or "")[:160],
                     "keywords": [str(k).lower().strip(".,!?") for k in (x.get("keywords") or keywords_from(text))][:12],
                     "emojis": [{"word": str(e["word"]).lower(), "emoji": str(e["emoji"])[:8]} for e in emo][:6]
                               or emojis_from(text),
@@ -419,6 +434,7 @@ def pick_moments(words, n, lo, hi, use_ai, log, title="", cands=None):
             "title": p["title"],
             "hook": p["hook"],
             "score": p.get("score", 60), "reasons": p.get("reasons", []), "hook_text": p.get("hook_text", ""),
+            "tease": p.get("tease", ""),
             "keywords": p.get("keywords", []), "emojis": p.get("emojis", []), "loop": p.get("loop", False),
             "text": " ".join(s["text"] for s in sents[i:j + 1]),
             "selected": len(clips) < n,

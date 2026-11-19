@@ -356,7 +356,8 @@ class LiveSession(threading.Thread):
                 "at": stamp, "peak": peak, "hype": round(hype, 2), "text": text or "(no speech)", "selected": True,
                 "title": meta["title"], "hook": "Live hype: " + ", ".join(signals),
                 "score": meta["score"], "reasons": ["⚡ " + s for s in signals] + meta.get("reasons", [])[:2],
-                "hook_text": meta["hook_text"], "keywords": meta["keywords"], "emojis": meta["emojis"], "loop": False}
+                "hook_text": meta["hook_text"], "keywords": meta["keywords"], "emojis": meta["emojis"], "loop": False,
+                "tease_at": round(peak - off, 2)}   # cold open on the hype peak itself
         self.job["clips"].append(clip)
         o = self.job["outputs"].setdefault(cid, {"status": "rendering"})
         self.save(self.job)
@@ -402,7 +403,7 @@ Transcript of the clip (may be partial, stream speech is messy):
 
 Return ONLY a JSON object, no prose:
 {{"title": "punchy Shorts title, max 60 chars, 1 emoji max",
-  "hook_text": "on-screen hook, max 6 words, ALL CAPS, no emoji",
+  "hook_text": "on-screen hook. {P.HOOK_TEXT_RULES.replace('"', "'")}",
   "score": 0-100 virality guess,
   "reasons": ["2 very short reasons"],
   "keywords": ["4-8 words from the transcript worth emphasising"],

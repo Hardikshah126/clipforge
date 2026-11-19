@@ -14,7 +14,7 @@ SFX_DIR = C.APP / "sfx"
 DEFAULT_POLISH = dict(
     cut_silence=True, max_gap=0.35, cut_fillers=True,
     zoom="subtle",               # off | subtle | punchy
-    hero=True, emojis=True, hook_title=True, hook_secs=2.6,
+    hero=True, emojis=True, hook_title=True, hook_secs=2.6, cold_open=True,
     sfx=True, sfx_vol=0.55, music="off", music_vol=0.14,
     progress=True, handle="", logo=False, end_card=True, cta="FOLLOW FOR MORE",
 )
@@ -96,6 +96,67 @@ def out_words(ws, segs):
 
 def select_expr(segs, t0):
     return "+".join(f"between(t,{a - t0:.3f},{b - t0:.3f})" for a, b in segs)
+
+
+# ------------------------------------------------------------------ hook: weak openers + cold-open tease
+WEAK_OPEN = {"so", "and", "but", "okay", "ok", "yeah", "yes", "well", "like", "um", "uh", "basically", "anyway",
+             "alright", "right", "now", "oh", "hmm", "see", "look", "listen"}
+
+
+def strip_weak_open(words, limit=3):
+    """Drop up to `limit` throat-clearing words at the very start ('So, yeah, ...') so the clip opens on content."""
+    k = 0
+    while k < min(limit, len(words) - 4) and _bare(words[k]["w"]) in WEAK_OPEN:
+        k += 1
+    return words[k:]
+
+
+def _tok(s):
+    return re.sub(r"[^a-z0-9']", "", s.lower())
+
+
+def find_tease(words, clip, min_len=1.2, max_len=4.2):
+    """Source-time (a, b) of the cold-open line, or None.
+    Uses the AI's word-for-word `tease` quote, else `tease_at` (live hype peak)."""
+    if len(words) < 8:
+        return None
+    clip_s, clip_e = words[0]["s"], words[-1]["e"]
+    if clip_e - clip_s < 12:                       # too short to be worth a flash-forward
+        return None
+    q = [t for t in (_tok(x) for x in str(clip.get("tease") or "").split()) if t]
+    span = None
+    if len(q) >= 3:
+        toks = [_tok(w["w"]) for w in words]
+        best, bi = 0, -1
+        for i in range(len(toks) - len(q) + 1):
+            sc = sum(1 for k, t in enumerate(q) if toks[i + k] == t)
+            if sc > best:
+                best, bi = sc, i
+        if bi >= 0 and best >= 0.6 * len(q):
+            span = (bi, bi + len(q) - 1)
+    elif clip.get("tease_at") is not None:
+        t = float(clip["tease_at"])
+        near = [i for i, w in enumerate(words) if w["s"] <= t + 1.5 and w["e"] >= t - 2.5]
+        if near:
+            span = (near[0], near[-1])
+    if not span:
+        return None
+    i, j = span
+    while j > i and words[j]["e"] - words[i]["s"] > max_len:     # keep the end (punchlines land last)
+        i += 1
+    while words[j]["e"] - words[i]["s"] < min_len and (i > 0 or j < len(words) - 1):
+        if j < len(words) - 1:
+            j += 1
+        else:
+            i -= 1
+    a, b = words[i]["s"] - 0.05, words[j]["e"] + 0.15
+    if j + 1 < len(words):                          # never bleed into the next word
+        b = min(b, max(words[j + 1]["s"] - 0.01, words[j]["e"]))
+    if i > 0:
+        a = max(a, words[i - 1]["e"])
+    if a - clip_s < 3:                              # teasing the opening line itself adds nothing
+        return None
+    return round(a, 3), round(b, 3)
 
 
 # ------------------------------------------------------------------ zooms

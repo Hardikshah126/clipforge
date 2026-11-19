@@ -71,13 +71,33 @@ def pick_music(choice, index, seed):
 
 def graph(layout, info, gp_h, ass_rel, dur, has_audio, avoid_burned, fonts_rel="fonts", boxes=None,
           sel=None, zexpr=None, emoji_ins=(), logo_in=None, progress=None, music_in=None, music_vol=0.14,
-          sfx_in=None):
-    """Video+audio filter graph. Inputs: 0 = source, 1 = gameplay (split only), then extras by index."""
+          sfx_in=None, tease_in=None, tease_dur=0.0):
+    """Video+audio filter graph. Inputs: 0 = source, 1 = gameplay (split only), then extras by index.
+    tease_in: a second cut of the source played first as a cold open, then the clip proper."""
     sw, sh = info["width"], info["height"]
     subs = f"subtitles={ass_rel}:fontsdir={fonts_rel}"
     sharpen = ",unsharp=5:5:0.8" if gp_h and gp_h < 720 else ""
     cut = f",select='{sel}',setpts=N/FRAME_RATE/TB" if sel else ""
-    src = f"[0:v]fps=30{cut}"
+    acut = f",aselect='{sel}',asetpts=N/SR/TB" if sel else ""
+    afmt = "aformat=sample_rates=48000:channel_layouts=stereo"
+    if tease_in is not None:
+        td = tease_dur
+        pre = (f"[{tease_in}:v]fps=30,setpts=PTS-STARTPTS,trim=0:{td:.3f},setpts=PTS-STARTPTS[tzv];"
+               f"[0:v]fps=30{cut}[bzv];")
+        if has_audio:
+            pre += (f"[{tease_in}:a]{afmt},asetpts=PTS-STARTPTS,atrim=0:{td:.3f},asetpts=PTS-STARTPTS,"
+                    f"afade=t=out:st={max(td - 0.08, 0):.3f}:d=0.08[tza];"
+                    f"[0:a]{afmt}{acut},afade=t=in:d=0.06[bza];"
+                    f"[tzv][tza][bzv][bza]concat=n=2:v=1:a=1[cv][ca];")
+            asrc = "[ca]"
+        else:
+            pre += "[tzv][bzv]concat=n=2:v=1:a=0[cv];"
+        src = f"{pre}[cv]null"
+    else:
+        src = f"[0:v]fps=30{cut}"
+        asrc = f"[0:a]{afmt}{acut},"
+        if asrc.endswith(","):
+            asrc = asrc[:-1]
 
     def zoom(w, h):
         return ("," + FX.zoompan(zexpr, w, h)) if zexpr else ""
@@ -112,6 +132,10 @@ def graph(layout, info, gp_h, ass_rel, dur, has_audio, avoid_burned, fonts_rel="
              f"[b]scale=1080:{fg_h}:flags=lanczos{zoom(1080, fg_h)},setsar=1[fg];"
              f"[bg][fg]overlay=(W-w)/2:(H-h)/2[base]")
     last = "base"
+    if tease_in is not None:   # white flash on the cut from the cold open into the story
+        v += (f";[{last}]drawbox=x=0:y=0:w=iw:h=ih:color=white@0.6:t=fill:"
+              f"enable='between(t,{tease_dur:.3f},{tease_dur + 0.08:.3f})'[fl]")
+        last = "fl"
     for k, (idx, t_a, t_b, y) in enumerate(emoji_ins):       # emoji pops with a little drop-in bounce
         v += (f";[{last}][{idx}:v]overlay=x=(W-w)/2:y='{y}-34*max(0,1-(t-{t_a:.3f})/0.18)'"
               f":enable='between(t,{t_a:.3f},{t_b:.3f})'[e{k}]")
@@ -129,8 +153,7 @@ def graph(layout, info, gp_h, ass_rel, dur, has_audio, avoid_burned, fonts_rel="
     v += f";[{last}]format=yuv420p[v]"
     if not has_audio:
         return v
-    acut = f",aselect='{sel}',asetpts=N/SR/TB" if sel else ""
-    a = (f";[0:a]aformat=sample_rates=48000:channel_layouts=stereo{acut},"
+    a = (f";{asrc}{'' if asrc.endswith(']') else ','}"
          f"afade=t=in:d=0.05,afade=t=out:st={max(dur - 0.25, 0):.2f}:d=0.25[voice]")
     mix = ["[voice]"]
     if music_in is not None:   # music ducks under the voice
@@ -169,6 +192,9 @@ def render_clip(job_dir: Path, src: Path, info, words, clip, settings, index, ou
     ws = words_in(words, start, end)
     if not ws:
         raise PipelineError(f"No speech found in {start:.1f}-{end:.1f}s")
+    if pol.get("cold_open", True) and ws[0]["w"].strip():
+        ws = FX.strip_weak_open(ws)        # open on content, not "so, yeah, um"
+    tease = FX.find_tease(ws, clip) if pol.get("cold_open", True) else None
     t0 = max(ws[0]["s"] - 0.12, 0)
     span = ws[-1]["e"] + 0.35 - t0
 
@@ -181,16 +207,28 @@ def render_clip(job_dir: Path, src: Path, info, words, clip, settings, index, ou
     ow = FX.out_words(kept, segs)
     sel = FX.select_expr(segs, t0) if (len(segs) > 1 or abs(segs[0][0] - t0) > 0.01) else None
 
+    # 1b) cold open: flash the payoff line first, then cut back to the start of the story
+    td = 0.0
+    if tease:
+        ta, tb = tease
+        td = round(tb - ta, 3)
+        tw = [{"s": w["s"] - ta, "e": min(w["e"], tb) - ta, "w": w["w"]} for w in ws if ta <= w["s"] < tb - 0.05]
+        ow = tw + [{"s": w["s"] + td, "e": w["e"] + td, "w": w["w"]} for w in ow]
+        dur += td
+
     # 2) what to emphasise
     keywords = clip.get("keywords") or []
     hero = keywords if pol["hero"] else []
-    zexpr, punches = FX.zoom_plan(ow, segs, keywords, pol, dur)
+    zexpr, punches = FX.zoom_plan(ow, ([(0.0, td)] if td else []) + segs, keywords, pol, dur)
+    if td and pol.get("zoom", "subtle") != "off":   # tease sits punched-in, then snaps out on the cut
+        zexpr = (zexpr or "1") + f"+0.12*between(it,0,{td:.3f})"
     emos = FX.emoji_events(ow, clip.get("emojis") or [], dur) if pol["emojis"] else []
 
     # 3) captions, all in output time
     tag = clip["id"] + ("_still" if still_at is not None else "")
     ass = job_dir / f"{tag}.ass"
-    hook = (clip.get("hook_text") or clip.get("title", ""), float(pol["hook_secs"])) if pol["hook_title"] else None
+    hook_secs = max(float(pol["hook_secs"]), td + 1.2) if td else float(pol["hook_secs"])
+    hook = (clip.get("hook_text") or clip.get("title", ""), hook_secs) if pol["hook_title"] else None
     cta = (pol["cta"], max(dur - 1.9, 0), dur) if pol["end_card"] and dur > 8 else None
     top_y = 150 if layout in ("split", "stream", "full") else 260
     captions.build(ow, style, 0.0, pos_y, ass, hero=hero, hook=hook, handle=pol.get("handle", ""),
@@ -227,6 +265,8 @@ def render_clip(job_dir: Path, src: Path, info, words, clip, settings, index, ou
             music_in, n_in = n_in, n_in + 1
         if pol["sfx"]:
             ev = [("boom", 0.02)] if hook else []
+            if td:
+                ev.append(("whoosh", max(td - 0.22, 0)))
             ev += [("whoosh", max(t - 0.12, 0)) for t in punches]
             ev += [("pop", a) for _, a, _ in emos]
             if cta:
@@ -236,12 +276,18 @@ def render_clip(job_dir: Path, src: Path, info, words, clip, settings, index, ou
                 inputs += ["-i", str(sfx)]
                 sfx_in, n_in = n_in, n_in + 1
 
+    tease_in = None
+    if td:
+        inputs += ["-ss", f"{tease[0]:.3f}", "-t", f"{td + 0.2:.3f}", "-i", str(src)]
+        tease_in, n_in = n_in, n_in + 1
+
     hl = (style.get("highlight") or "#FFE600").lstrip("#")
     rel = lambda p: p.relative_to(C.APP).as_posix()
     g = graph(layout, info, gp_h, rel(ass), dur, has_audio, avoid,
               boxes={k: settings.get(k) for k in ("face_box", "game_box")}, sel=sel, zexpr=zexpr,
               emoji_ins=emoji_ins, logo_in=logo_in, progress=("0x" + hl) if pol["progress"] else None,
-              music_in=music_in, music_vol=float(pol["music_vol"]), sfx_in=sfx_in)
+              music_in=music_in, music_vol=float(pol["music_vol"]), sfx_in=sfx_in,
+              tease_in=tease_in, tease_dur=td)
     gf = job_dir / f"{tag}.graph"
     gf.write_text(g, encoding="utf-8")
     cmd = [C.FFMPEG, "-v", "error", "-y", *inputs, "-/filter_complex", rel(gf), "-map", "[v]"]

@@ -196,7 +196,7 @@ def write_meta(job, force=False):
 
 
 def sig(job, c):
-    return json.dumps([c["start"], c["end"], c["title"], c.get("hook_text"), c.get("keywords"), c.get("emojis"),
+    return json.dumps([c["start"], c["end"], c["title"], c.get("hook_text"), c.get("tease"), c.get("keywords"), c.get("emojis"),
                        job["settings"]], sort_keys=True)
 
 
@@ -527,6 +527,7 @@ class H(BaseHTTPRequestHandler):
                                     t["selected"] = bool(c.get("selected", t["selected"]))
                                     t["title"] = str(c.get("title", t["title"]))[:100]
                                     t["hook_text"] = str(c.get("hook_text", t.get("hook_text", "")))[:60]
+                                    t["tease"] = str(c.get("tease", t.get("tease", "")))[:160]
                                     t["start"] = round(float(c.get("start", t["start"])), 2)
                                     t["end"] = round(max(float(c.get("end", t["end"])), t["start"] + 3), 2)
                         save(job)
